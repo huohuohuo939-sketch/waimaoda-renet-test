@@ -1,0 +1,73 @@
+name: External Network Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  network-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check DNS and HTTPS reachability
+        run: |
+          python - <<'PY'
+          import socket
+          import urllib.request
+          import urllib.error
+          import ssl
+          import json
+          import time
+
+          targets = {
+              "Bing": "https://www.bing.com/",
+              "Baidu": "https://www.baidu.com/",
+              "DuckDuckGo": "https://html.duckduckgo.com/html/",
+              "Yandex": "https://yandex.com/",
+              "Brave Search": "https://search.brave.com/",
+              "SerpApi": "https://serpapi.com/",
+          }
+          print("UTC:", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+          print("Python:", __import__("sys").version)
+          print("TLS:", ssl.OPENSSL_VERSION)
+          results = []
+          for name, url in targets.items():
+              host = url.split("/")[2]
+              row = {"service": name, "host": host}
+              try:
+                  infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+                  row["dns"] = "PASS"
+                  row["addresses"] = sorted({x[4][0] for x in infos})[:4]
+              except Exception as e:
+                  row["dns"] = "FAIL"
+                  row["dns_error"] = f"{type(e).__name__}: {e}"
+                  row["https"] = "SKIPPED"
+                  results.append(row)
+                  print(json.dumps(row, ensure_ascii=False))
+                  continue
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": "WaiMaoDaRen-Network-Diagnostic/1.0"})
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      row["https"] = "PASS"
+                      row["http_status"] = resp.status
+                      row["content_type"] = resp.headers.get("Content-Type", "")
+                      row["bytes_read"] = len(resp.read(4096))
+              except urllib.error.HTTPError as e:
+                  row["https"] = "REACHABLE_HTTP_RESPONSE"
+                  row["http_status"] = e.code
+              except Exception as e:
+                  row["https"] = "FAIL"
+                  row["https_error"] = f"{type(e).__name__}: {e}"
+              results.append(row)
+              print(json.dumps(row, ensure_ascii=False))
+          passed = sum(1 for r in results if r.get("dns") == "PASS" and r.get("https") in ("PASS", "REACHABLE_HTTP_RESPONSE"))
+          print(f"SUMMARY: {passed}/{len(results)} hosts completed DNS + HTTPS connection")
+          if passed == 0:
+              raise SystemExit("No external hosts reachable from this runner.")
+          PY
